@@ -1,0 +1,28 @@
+[package]
+name = "fs-polkit"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+homepage = "Don't have"
+repository = "bleur"
+description = "File manipulation"
+
+# Dependencies that will included with final binary
+[dependencies]
+zbus_polkit = "5.1.0"
+tokio = { version = "1.53.1", features = ["full"] }
+zbus = "5.19.0"
+anyhow = "1.0.104"
+reqwest = "0.13.5"
+sui-compat = "0.1.219"
+tokio-stream = { version = "0.1.19", features = ["full"] }
+
+# Development dependencies which aren't used in release binary
+[dev-dependencies]
+
+# Optimize release binary as much as possible
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
