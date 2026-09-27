@@ -13,9 +13,17 @@ zbus_polkit = "5.1.0"
 tokio = { version = "1.53.1", features = ["full"] }
 zbus = "5.19.0"
 anyhow = "1.0.104"
-reqwest = "0.13.5"
 sui-compat = "0.1.219"
 tokio-stream = { version = "0.1.19", features = ["full"] }
+indicatif = "0.15.0"
+futures = "0.3.30"
+futures-util = "0.3.30"
+
+error-chain = "0.12.4"
+ftp = "3.0.1"
+reqwest = { version = "0.13.5", features = ["blocking", "stream"] }
+tempfile = "3.10.1"
+#ftp = { version = "<version>", features = ["secure"] }
 
 # Development dependencies which aren't used in release binary
 [dev-dependencies]
