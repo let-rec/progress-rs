@@ -1,16 +1,10 @@
-use std::{fs::File, process::Stdio};
+use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use futures::TryFutureExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::{self, Client, Response, RequestBuilder};
-use tokio_stream::Stream;
-use std::io::{prelude::*, Bytes};
+use reqwest::{self, Client};
 use std::cmp::min;
-
-
-use std::io::BufReader;
-use std::time::Instant;
-use std::path::Path;
+use std::io::prelude::*;
+use std::{fs::File, process::Stdio};
 
 #[tokio::main]
 async fn main() {
@@ -24,7 +18,7 @@ async fn main() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-
+    // println!("Child: {child:?}");
     let out = child.wait_with_output().await.unwrap();
 
     let (fetched, _built, _) = String::try_from(out.stderr)
@@ -34,19 +28,35 @@ async fn main() {
         .fold((Vec::new(), Vec::new(), false), parse_dry_lines);
     for fetch in fetched.iter() {
         println!("Iter fetched: {fetch:?}");
-        download(&client,fetch, "/home/letrec/workspace/self/progress-rs/tmp").await;
+        download(
+            &client,
+            fetch,
+            "/home/letrec/workspace/self/progress-rs/tmp",
+        )
+        .await
+        .unwrap();
     }
 }
 
 fn parse_nar_hash(line: &str) -> Option<&str> {
     line.split("/").nth(3)?.split("-").next()
 }
+fn total_fetch(line: &str) -> Option<&str> {
+    line.split("(").nth(1)?.split(",").next()
+}
 
 fn parse_dry_lines(
     (mut fetched, mut built, is_fetched): (Vec<String>, Vec<String>, bool),
     line: String,
 ) -> (Vec<String>, Vec<String>, bool) {
+    println!("LINE: {line}");
     if line.contains("will be fetched") {
+        let mut total = total_fetch(&line).unwrap().split(" ").into_iter();
+        let size_num = total.next().unwrap();
+        let size_cap = total.next().unwrap();
+        println!("TOTAL: {total:?}");
+        println!("TOTAL size number: {size_num:?}");
+        println!("TOTAL size cap: {size_cap:?}");
         return (fetched, built, true);
     }
 
@@ -55,6 +65,7 @@ fn parse_dry_lines(
     }
 
     if let Some(hash) = parse_nar_hash(&line) {
+        // println!("Hash: {hash}");
         if is_fetched {
             fetched.push(hash.to_string());
         } else {
@@ -68,7 +79,7 @@ fn parse_dry_lines(
 enum DownloadProgress {
     Downloaded,
     Downloading,
-    Error
+    Error,
 }
 
 /*
@@ -106,12 +117,11 @@ async fn download(client: &Client, nar: &str) -> Result<DownloadProgress, reqwes
 }
 */
 
-
-pub async fn download(client: &Client, nar:&str, path: &str) -> Result<(), String> {
-    let narinfo = client.get(format!("https://cache.xinux.uz/{nar}.narinfo"))
+pub async fn download(client: &Client, nar: &str, path: &str) -> Result<()> {
+    let narinfo = client
+        .get(format!("https://cache.xinux.uz/{nar}.narinfo"))
         .send()
-        .await
-        .unwrap();
+        .await?;
     let nar = narinfo.text().await.unwrap();
     let narinfo = sui_compat::narinfo::NarInfo::parse(&nar).unwrap();
     let url = &format!("https://cache.xinux.uz/{}", narinfo.url);
@@ -121,10 +131,10 @@ pub async fn download(client: &Client, nar:&str, path: &str) -> Result<(), Strin
         .get(url)
         .send()
         .await
-        .or(Err(format!("Failed to GET from '{}'", &url)))?;
+        .context(format!("Failed to GET from '{}'", &url))?;
     let total_size = res
         .content_length()
-        .ok_or(format!("Failed to get content length from '{}'", &url))?;
+        .context(format!("Failed to get content length from '{}'", &url))?;
 
     // Indicatif setup
     let pb: ProgressBar = ProgressBar::new(total_size);
@@ -134,14 +144,14 @@ pub async fn download(client: &Client, nar:&str, path: &str) -> Result<(), Strin
     pb.set_message(&format!("Downloading {}", url));
 
     // download chunks
-    let mut file = File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
+    let mut file = File::create(path).context(format!("Failed to create file '{}'", path))?;
     let mut downloaded: u64 = 0;
     let mut stream = res.bytes_stream();
 
     while let Some(item) = stream.next().await {
-        let chunk = item.or(Err(format!("Error while downloading file")))?;
+        let chunk = item.context(format!("Error while downloading file"))?;
         file.write_all(&chunk)
-            .or(Err(format!("Error while writing to file")))?;
+            .context(format!("Error while writing to file"))?;
         let new = min(downloaded + (chunk.len() as u64), total_size);
         downloaded = new;
         pb.set_position(new);
