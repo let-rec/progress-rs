@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
+use nix_daemon::{Progress, Store};
 use reqwest::{self, Client};
 use std::cmp::min;
 use std::io::prelude::*;
@@ -19,13 +20,37 @@ async fn main() -> Result<()> {
         .spawn()
         .context("Failed to take child")?;
     // println!("Child: {child:?}");
-    let out = child.wait_with_output().await.context("Failed to take output")?;
+    let out = child
+        .wait_with_output()
+        .await
+        .context("Failed to take output")?;
 
     let (fetched, _built, _) = String::try_from(out.stderr)
         .unwrap()
         .lines()
         .map(|s| s.to_string())
         .fold((Vec::new(), Vec::new(), false), parse_dry_lines);
+
+    // TODO: does this while in xinux or its installation
+    let mut s = nix_daemon::nix::DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await?;
+
+    // https://docs.rs/nix-daemon/latest/nix_daemon/
+    let aa: u64 = s
+        // .query_missing([
+        //     // "github:msftyago/nix#nixosConfigurations.yago.config.system.build.toplevel",
+        //     "/nix/store/n1dfwkj6srpvgj90c2lsk4ax2vlq7lck-python3.13-boto3-1.42.31",
+        // ])
+        .query_missing(&fetched)
+        .result()
+        .await
+        .into_iter()
+        .map(|i| i.download_size)
+        .sum();
+
+    println!("{aa:?}");
+    todo!();
     // let mut total: u64 = 0;
     for fetch in fetched.iter() {
         println!("Iter fetched: {fetch:?}");
@@ -34,7 +59,8 @@ async fn main() -> Result<()> {
             fetch,
             "/home/letrec/workspace/self/progress-rs/tmp",
         )
-        .await.context("Failed to donwload in for")?;
+        .await
+        .context("Failed to donwload in for")?;
 
         // total = total + size;
         // println!("In for: {total:?}");
@@ -54,16 +80,8 @@ fn parse_dry_lines(
     (mut fetched, mut built, is_fetched): (Vec<String>, Vec<String>, bool),
     line: String,
 ) -> (Vec<String>, Vec<String>, bool) {
-    println!("LINE: {line}");
+    // println!("LINE: {line}");
     if line.contains("will be fetched") {
-        let mut total = total_fetch(&line).unwrap().split(" ").into_iter();
-        let size_num = total.next().unwrap().parse::<u64>().unwrap();
-        let size_cap = total.next().unwrap();
-        println!("TOTAL: {total:?}");
-        println!("TOTAL size number: {size_num:?}");
-        println!("TOTAL size cap: {size_cap:?}");
-        let a = HumanBytes(size_num * (1024*3));
-        println!("TOTAL BYTES: {a}");
         return (fetched, built, true);
     }
 
@@ -74,9 +92,10 @@ fn parse_dry_lines(
     if let Some(hash) = parse_nar_hash(&line) {
         // println!("Hash: {hash}");
         if is_fetched {
-            fetched.push(hash.to_string());
+            // fetched.push(hash.to_string());
+            fetched.push(line.trim().to_string());
         } else {
-            built.push(hash.to_string());
+            built.push(line.trim().to_string());
         }
     }
 
