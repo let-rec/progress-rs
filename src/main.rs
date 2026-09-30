@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 use reqwest::{self, Client};
 use std::cmp::min;
 use std::io::prelude::*;
 use std::{fs::File, process::Stdio};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     let flake_url = "github:msftyago/nix#nixosConfigurations.yago.config.system.build.toplevel";
     // let flake_url = "nixpkgs#go";
     let client = Client::new();
@@ -17,15 +17,16 @@ async fn main() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap();
+        .context("Failed to take child")?;
     // println!("Child: {child:?}");
-    let out = child.wait_with_output().await.unwrap();
+    let out = child.wait_with_output().await.context("Failed to take output")?;
 
     let (fetched, _built, _) = String::try_from(out.stderr)
         .unwrap()
         .lines()
         .map(|s| s.to_string())
         .fold((Vec::new(), Vec::new(), false), parse_dry_lines);
+    // let mut total: u64 = 0;
     for fetch in fetched.iter() {
         println!("Iter fetched: {fetch:?}");
         download(
@@ -33,9 +34,13 @@ async fn main() {
             fetch,
             "/home/letrec/workspace/self/progress-rs/tmp",
         )
-        .await
-        .unwrap();
+        .await.context("Failed to donwload in for")?;
+
+        // total = total + size;
+        // println!("In for: {total:?}");
     }
+    // println!("After for: {total:?}");
+    Ok(())
 }
 
 fn parse_nar_hash(line: &str) -> Option<&str> {
@@ -52,11 +57,13 @@ fn parse_dry_lines(
     println!("LINE: {line}");
     if line.contains("will be fetched") {
         let mut total = total_fetch(&line).unwrap().split(" ").into_iter();
-        let size_num = total.next().unwrap();
+        let size_num = total.next().unwrap().parse::<u64>().unwrap();
         let size_cap = total.next().unwrap();
         println!("TOTAL: {total:?}");
         println!("TOTAL size number: {size_num:?}");
         println!("TOTAL size cap: {size_cap:?}");
+        let a = HumanBytes(size_num * (1024*3));
+        println!("TOTAL BYTES: {a}");
         return (fetched, built, true);
     }
 
@@ -118,12 +125,19 @@ async fn download(client: &Client, nar: &str) -> Result<DownloadProgress, reqwes
 */
 
 pub async fn download(client: &Client, nar: &str, path: &str) -> Result<()> {
-    let narinfo = client
+    let mut narinfo = client
         .get(format!("https://cache.xinux.uz/{nar}.narinfo"))
         .send()
         .await?;
-    let nar = narinfo.text().await.unwrap();
-    let narinfo = sui_compat::narinfo::NarInfo::parse(&nar).unwrap();
+
+    if !narinfo.status().is_success() {
+        narinfo = client
+            .get(format!("https://cache.nixos.org/{nar}.narinfo"))
+            .send()
+            .await?;
+    }
+    let nar = narinfo.text().await.context("Failed to take nar")?;
+    let narinfo = sui_compat::narinfo::NarInfo::parse(&nar).context("Failed to take narinfo")?;
     let url = &format!("https://cache.xinux.uz/{}", narinfo.url);
 
     // Reqwest setup
