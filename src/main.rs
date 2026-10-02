@@ -1,16 +1,19 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Ok, Result};
 use futures_util::StreamExt;
-use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use nix_daemon::{Progress, Store};
 use reqwest::{self, Client};
-use std::cmp::min;
-use std::io::prelude::*;
-use std::{fs::File, process::Stdio};
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
+// use std::cmp::min;
+// use std::io::prelude::*;
+use std::process::Stdio;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let flake_url = "github:msftyago/nix#nixosConfigurations.yago.config.system.build.toplevel";
-    // let flake_url = "nixpkgs#go";
+    // let flake_url = "github:msftyago/nix#nixosConfigurations.yago.config.system.build.toplevel";
+    let flake_url = "nixpkgs#hello";
     let client = Client::new();
 
     let child = tokio::process::Command::new("nix")
@@ -37,11 +40,7 @@ async fn main() -> Result<()> {
         .await?;
 
     // https://docs.rs/nix-daemon/latest/nix_daemon/
-    let aa: u64 = s
-        // .query_missing([
-        //     // "github:msftyago/nix#nixosConfigurations.yago.config.system.build.toplevel",
-        //     "/nix/store/n1dfwkj6srpvgj90c2lsk4ax2vlq7lck-python3.13-boto3-1.42.31",
-        // ])
+    let total_download: u64 = s
         .query_missing(&fetched)
         .result()
         .await
@@ -49,31 +48,34 @@ async fn main() -> Result<()> {
         .map(|i| i.download_size)
         .sum();
 
-    println!("{aa:?}");
-    todo!();
-    // let mut total: u64 = 0;
-    for fetch in fetched.iter() {
-        println!("Iter fetched: {fetch:?}");
-        download(
-            &client,
-            fetch,
-            "/home/letrec/workspace/self/progress-rs/tmp",
-        )
-        .await
-        .context("Failed to donwload in for")?;
+    // Indicatif setup
+    let pb: ProgressBar = ProgressBar::new(total_download);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+        .progress_chars("#>-"));
+    let pb = Arc::new(pb);
 
-        // total = total + size;
-        // println!("In for: {total:?}");
+    println!("Daemon Store: {total_download:?}");
+    // todo!();
+    for fetch in fetched.iter() {
+        // let nar = s.query_pathinfo(&fetch).result().await.unwrap().into_iter().map(|x| x.nar_hash);
+        // let nar = s.query_pathinfo(&fetch).result().await?;
+
+        let file_name = fetch.split("-").nth(1).context("context")?;
+        let path = format!(
+            "/home/letrec/workspace/self/progress-rs/tmp/tmp_{}",
+            file_name
+        );
+        download(&client, fetch, &path, Arc::clone(&pb))
+            .await
+            .context("Failed to donwload in for")?;
     }
-    // println!("After for: {total:?}");
+    pb.finish_with_message("All packages downloaded");
     Ok(())
 }
 
 fn parse_nar_hash(line: &str) -> Option<&str> {
     line.split("/").nth(3)?.split("-").next()
-}
-fn total_fetch(line: &str) -> Option<&str> {
-    line.split("(").nth(1)?.split(",").next()
 }
 
 fn parse_dry_lines(
@@ -108,88 +110,48 @@ enum DownloadProgress {
     Error,
 }
 
-/*
-async fn download(client: &Client, nar: &str) -> Result<DownloadProgress, reqwest::StatusCode> {
-    let narinfo = client.get(format!("https://cache.xinux.uz/{nar}.narinfo"))
-        .send()
-        .await
-        .unwrap();
-    let nar = narinfo.text().await.unwrap();
-    let narinfo = sui_compat::narinfo::NarInfo::parse(&nar).unwrap();
-
-    // let content = client.get(&format!("https://cache.xinux.uz/{}", narinfo.url))
-    //     .send()
-    //     .await
-    //     .unwrap();
-
-    let dwn = download_file(&client, &format!("https://cache.xinux.uz/{}", narinfo.url), "/home/letrec/workspace/self/progress-rs/tmp").await;
-    Ok(DownloadProgress::Downloaded)
-
-    // if content.status().is_success() {
-    //     let dwn = download_file(&client, &format!("https://cache.xinux.uz/{}", narinfo.url), "/home/letrec/workspace/self/progress-rs/tmp").await;
-    //     Ok(DownloadProgress::Downloaded)
-    // } else {
-    //     match content.error_for_status() {
-    //         Ok(res) => {
-    //             println!("Status res: {:?}", res);
-    //             Ok(DownloadProgress::Error)
-    //         },
-    //         Err(err) => {
-    //             println!("Error res: {:?}", err.status());
-    //             Err(reqwest::StatusCode::BAD_REQUEST)
-    //         }
-    //     }
-    // }
-}
-*/
-
-pub async fn download(client: &Client, nar: &str, path: &str) -> Result<()> {
-    let mut narinfo = client
-        .get(format!("https://cache.xinux.uz/{nar}.narinfo"))
-        .send()
-        .await?;
-
-    if !narinfo.status().is_success() {
-        narinfo = client
-            .get(format!("https://cache.nixos.org/{nar}.narinfo"))
-            .send()
-            .await?;
-    }
-    let nar = narinfo.text().await.context("Failed to take nar")?;
-    let narinfo = sui_compat::narinfo::NarInfo::parse(&nar).context("Failed to take narinfo")?;
-    let url = &format!("https://cache.xinux.uz/{}", narinfo.url);
+pub async fn download(client: &Client, nar: &str, path: &str, pb: Arc<ProgressBar>) -> Result<()> {
+    let cache_xinux = format!("https://cache.xinux.uz/{nar}.narinfo");
+    let cache_nixos = format!("https://cache.nixos.org/{nar}.narinfo");
 
     // Reqwest setup
-    let res = client
-        .get(url)
+    let mut res = client
+        .get(&cache_xinux)
         .send()
         .await
-        .context(format!("Failed to GET from '{}'", &url))?;
-    let total_size = res
-        .content_length()
-        .context(format!("Failed to get content length from '{}'", &url))?;
+        .context(format!("Failed to GET from '{}'", &cache_xinux))?;
+    if !res.status().is_success() {
+        res = client
+            .get(&cache_nixos)
+            .send()
+            .await
+            .context(format!("Failed to GET from '{}'", &cache_nixos))?;
+        println!("RES in nixos: {res:?}");
+    }
 
-    // Indicatif setup
-    let pb: ProgressBar = ProgressBar::new(total_size);
-    pb.set_style(ProgressStyle::default_bar()
-        .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-        .progress_chars("#>-"));
-    pb.set_message(&format!("Downloading {}", url));
+    println!("RES: {res:?}");
+    pb.set_message(&format!(
+        "Downloading {}",
+        nar.split('/').last().context("Can not take nar")?
+    ));
+    // let size = res
+    //     .content_length()
+    //     .context(format!("Failed to get content length from '{}'", &url))?;
 
     // download chunks
-    let mut file = File::create(path).context(format!("Failed to create file '{}'", path))?;
-    let mut downloaded: u64 = 0;
+    let mut file = File::create(path).await.context(format!("Failed to create file '{}'", path))?;
+    // let mut downloaded: u64 = 0;
     let mut stream = res.bytes_stream();
 
     while let Some(item) = stream.next().await {
         let chunk = item.context(format!("Error while downloading file"))?;
         file.write_all(&chunk)
+            .await
             .context(format!("Error while writing to file"))?;
-        let new = min(downloaded + (chunk.len() as u64), total_size);
-        downloaded = new;
-        pb.set_position(new);
+        // let new = min(downloaded + (chunk.len() as u64), size);
+        // downloaded = new;
+        pb.inc(chunk.len() as u64);
     }
 
-    pb.finish_with_message(&format!("Downloaded {} to {}", url, path));
     Ok(())
 }
